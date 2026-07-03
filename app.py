@@ -40,16 +40,17 @@ DEFAULT_CONFIG = {
             "name": "Immich",
             "enabled": True,
             "sources": [
-                "/mnt/plex/immich/",
-                "/home/joseph/immich-app/postgres/",
                 "/home/joseph/immich-app/docker-compose.yml",
                 "/home/joseph/immich-app/.env",
+                "/mnt/plex/immich/backups/",
+                "/mnt/plex/immich/library/",
+                "/mnt/plex/immich/upload/",
+                "/mnt/plex/immich/profile/",
             ],
             "excludes": [
                 "*.bak",
                 "*.backup",
                 "*_original*",
-                "*.tar.gz",
                 "*.tar",
                 "*.zip",
                 "*.tmp",
@@ -66,12 +67,8 @@ DEFAULT_CONFIG = {
             "date_filter": True,
             "date_from": "",
             "date_to": "",
-            "pg_dump": {
-                "enabled": True,
-                "container": "immich_postgres",
-                "user": "joseph",
-                "output": "/home/joseph/immich-app/immich_db_backup.sql",
-            },
+            "stop_container": False,
+            "containers": ["immich_server", "immich_machine_learning", "immich_redis", "immich_postgres"],
         },
         {
             "id": "jellyfin",
@@ -260,12 +257,12 @@ def compute_all_sizes():
                 per_source.append({"path": src, "size": format_size(sz)})
                 continue
             try:
+                du_cmd = ["du", "-sb"]
+                for exc in job.get("excludes", []):
+                    du_cmd.append(f"--exclude={exc}")
+                du_cmd.append(src)
                 result = subprocess.run(
-                    ["du", "-sb", "--exclude=*.sql", "--exclude=*.bak",
-                     "--exclude=*.backup", "--exclude=*_backup*",
-                     "--exclude=*_original*", "--exclude=*.tar.gz",
-                     "--exclude=*.tar", "--exclude=*.zip", src],
-                    capture_output=True, text=True, timeout=120
+                    du_cmd, capture_output=True, text=True, timeout=120
                 )
                 if result.returncode == 0:
                     sz = int(result.stdout.split()[0])
@@ -374,24 +371,20 @@ def run_backup(job, date_from=None, date_to=None):
         date_info = f" (date filter: {date_from or 'any'} to {date_to or 'now'})"
     append_log(job_id, f"=== Backup started for {job['name']}{date_info} ===")
 
+    stopped_containers = []
     try:
-        if job.get("pg_dump", {}).get("enabled"):
-            pg = job["pg_dump"]
-            append_log(job_id, f"Dumping PostgreSQL from container {pg['container']}...")
-            result = subprocess.run(
-                [
-                    "docker", "exec", pg["container"],
-                    "pg_dumpall", "-U", pg["user"],
-                ],
-                capture_output=True, text=True, timeout=600,
-            )
-            if result.returncode == 0:
-                with open(pg["output"], "w") as f:
-                    f.write(result.stdout)
-                size = os.path.getsize(pg["output"])
-                append_log(job_id, f"Database dump complete: {size / 1e9:.1f} GB")
-            else:
-                append_log(job_id, f"Database dump failed: {result.stderr}")
+        if job.get("stop_container") and job.get("containers"):
+            append_log(job_id, "Stopping containers for safe backup...")
+            for container in job["containers"]:
+                result = subprocess.run(
+                    ["docker", "stop", container],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode == 0:
+                    stopped_containers.append(container)
+                    append_log(job_id, f"Stopped {container}")
+                else:
+                    append_log(job_id, f"Warning: could not stop {container}: {result.stderr.strip()}")
 
         if job.get("use_local") and job.get("destination"):
             dest = job["destination"]
@@ -470,6 +463,18 @@ def run_backup(job, date_from=None, date_to=None):
     except Exception as e:
         append_log(job_id, f"ERROR: {str(e)}")
         running_jobs[job_id]["status"] = "failed"
+    finally:
+        if stopped_containers:
+            append_log(job_id, "Restarting containers...")
+            for container in reversed(stopped_containers):
+                result = subprocess.run(
+                    ["docker", "start", container],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode == 0:
+                    append_log(job_id, f"Started {container}")
+                else:
+                    append_log(job_id, f"WARNING: failed to start {container}: {result.stderr.strip()}")
 
     running_jobs[job_id]["finished"] = datetime.now().isoformat()
 

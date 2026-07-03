@@ -177,7 +177,7 @@
                     </div>
                     <div class="job-size" title="${esc(sourceDetails)}">
                         Size: <strong>${esc(sizeDisplay)}</strong>
-                        <span style="font-size: 0.7rem; color: var(--text-dim);">(excl. backups)</span>
+                        <span style="font-size: 0.7rem; color: var(--text-dim);">(excl. thumbs, encoded-video)</span>
                     </div>
                     ${hasDateFilter ? `
                     <div class="date-filter">
@@ -199,6 +199,7 @@
                     <div class="job-options">
                         <label><input type="checkbox" ${job.use_local ? 'checked' : ''} onchange="updateOption('${job.id}', 'use_local', this.checked)"> Local</label>
                         <label><input type="checkbox" ${job.use_gdrive ? 'checked' : ''} onchange="updateOption('${job.id}', 'use_gdrive', this.checked)"> Google Drive</label>
+                        ${job.containers ? `<label title="Stop containers before backup for a consistent snapshot (zero-risk method)"><input type="checkbox" ${job.stop_container ? 'checked' : ''} onchange="updateOption('${job.id}', 'stop_container', this.checked)"> Stop containers</label>` : ''}
                     </div>
                     <div class="job-actions">
                         <button class="btn btn-primary btn-sm" onclick="startBackup('${job.id}')" ${job.enabled ? '' : 'disabled'}>Backup Now</button>
