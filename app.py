@@ -41,10 +41,19 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "sources": [
                 "/mnt/plex/immich/",
+                "/home/joseph/immich-app/postgres/",
                 "/home/joseph/immich-app/docker-compose.yml",
                 "/home/joseph/immich-app/.env",
             ],
-            "excludes": BACKUP_FILE_EXCLUDES + [
+            "excludes": [
+                "*.bak",
+                "*.backup",
+                "*_original*",
+                "*.tar.gz",
+                "*.tar",
+                "*.zip",
+                "*.tmp",
+                "*.log",
                 "thumbs/",
                 "thumbnails/",
                 "encoded-video/",
