@@ -386,6 +386,25 @@ body {
 .toast.success { border-color: var(--green); }
 .toast.error { border-color: var(--red); }
 
+.date-filter {
+    margin-bottom: 0.75rem;
+}
+
+.date-input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.35rem 0.5rem;
+    color: var(--text);
+    font-size: 0.8rem;
+    font-family: inherit;
+    outline: none;
+    flex: 1;
+    color-scheme: dark;
+}
+
+.date-input:focus { border-color: var(--accent); }
+
 @media (max-width: 768px) {
     .container { padding: 1rem; }
     .jobs-grid { grid-template-columns: 1fr; }

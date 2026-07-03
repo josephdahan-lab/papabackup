@@ -16,7 +16,13 @@
     </div>
 
     <div class="container">
-        <div class="section-title">Backup Jobs</div>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+            <div class="section-title" style="margin-bottom: 0;">Backup Jobs</div>
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <span id="sizesStatus" style="font-size: 0.75rem; color: var(--text-dim);"></span>
+                <button class="btn btn-secondary btn-sm" onclick="refreshSizes()">Recalculate Sizes</button>
+            </div>
+        </div>
         <div id="jobsGrid" class="jobs-grid"></div>
 
         <div class="section-title">Custom Jobs</div>
@@ -41,7 +47,7 @@
             <div class="form-group">
                 <label>Exclude Patterns</label>
                 <textarea id="newJobExcludes" placeholder="node_modules&#10;.cache"></textarea>
-                <div class="help">One pattern per line (optional)</div>
+                <div class="help">One pattern per line (optional). Backup files (*.sql, *.bak, *.tar.gz, etc.) are excluded automatically.</div>
             </div>
             <div class="form-group">
                 <label>Local Destination</label>
@@ -81,7 +87,7 @@
 
     <script>
         let config = null;
-        let sizes = {};
+        let sizesData = {};
         let statusTimers = {};
 
         async function loadConfig() {
@@ -92,8 +98,31 @@
 
         async function loadSizes() {
             const res = await fetch('/api/sizes');
-            sizes = await res.json();
+            const data = await res.json();
+            sizesData = data.sizes || {};
+            const statusEl = document.getElementById('sizesStatus');
+            if (data.computing) {
+                statusEl.textContent = 'Calculating sizes...';
+                statusEl.style.color = 'var(--yellow)';
+                setTimeout(loadSizes, 3000);
+            } else {
+                const anySize = Object.values(sizesData)[0];
+                if (anySize && anySize.computed_at) {
+                    const t = new Date(anySize.computed_at);
+                    statusEl.textContent = `Last calculated: ${t.toLocaleString()}`;
+                    statusEl.style.color = 'var(--text-dim)';
+                } else {
+                    statusEl.textContent = '';
+                }
+            }
             renderJobs();
+        }
+
+        async function refreshSizes() {
+            await fetch('/api/sizes/refresh', {method: 'POST'});
+            document.getElementById('sizesStatus').textContent = 'Calculating sizes...';
+            document.getElementById('sizesStatus').style.color = 'var(--yellow)';
+            setTimeout(loadSizes, 2000);
         }
 
         async function checkGdrive() {
@@ -126,6 +155,13 @@
                 return;
             }
             jobs.forEach(job => {
+                const sizeInfo = sizesData[job.id];
+                const sizeDisplay = sizeInfo ? sizeInfo.total : 'pending...';
+                const sourceDetails = sizeInfo && sizeInfo.sources
+                    ? sizeInfo.sources.map(s => `${s.size} — ${s.path}`).join('\n')
+                    : '';
+                const hasDateFilter = job.date_filter || false;
+
                 const card = document.createElement('div');
                 card.className = `job-card${job.enabled ? '' : ' disabled'}`;
                 card.innerHTML = `
@@ -139,7 +175,22 @@
                     <div class="job-sources">
                         ${job.sources.map(s => `<div title="${esc(s)}">${esc(s)}</div>`).join('')}
                     </div>
-                    <div class="job-size">Size: ${sizes[job.id] || 'calculating...'}</div>
+                    <div class="job-size" title="${esc(sourceDetails)}">
+                        Size: <strong>${esc(sizeDisplay)}</strong>
+                        <span style="font-size: 0.7rem; color: var(--text-dim);">(excl. backups)</span>
+                    </div>
+                    ${hasDateFilter ? `
+                    <div class="date-filter">
+                        <label style="display: block; font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.3rem;">Date Range (optional — backup only files modified in this period)</label>
+                        <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;">
+                            <input type="date" id="date-from-${job.id}" class="date-input" value="${job.date_from || ''}" placeholder="From">
+                            <span style="color: var(--text-dim); font-size: 0.8rem;">to</span>
+                            <input type="date" id="date-to-${job.id}" class="date-input" value="${job.date_to || ''}" placeholder="To">
+                            <button class="btn btn-secondary btn-sm" onclick="estimateSize('${job.id}')" title="Calculate filtered size">Est.</button>
+                        </div>
+                        <div id="filtered-size-${job.id}" style="font-size: 0.8rem; color: var(--accent); min-height: 1.2em;"></div>
+                    </div>
+                    ` : ''}
                     <div class="job-dest">
                         <label>Local Destination</label>
                         <input type="text" value="${esc(job.destination || '')}" placeholder="/mnt/backup/${job.id}"
@@ -197,11 +248,44 @@
             });
         }
 
+        async function estimateSize(jobId) {
+            const dateFrom = document.getElementById(`date-from-${jobId}`)?.value || '';
+            const dateTo = document.getElementById(`date-to-${jobId}`)?.value || '';
+            const el = document.getElementById(`filtered-size-${jobId}`);
+
+            if (!dateFrom && !dateTo) {
+                el.textContent = 'Set a date range first';
+                el.style.color = 'var(--text-dim)';
+                return;
+            }
+
+            el.textContent = 'Calculating...';
+            el.style.color = 'var(--yellow)';
+
+            const res = await fetch('/api/sizes/filtered', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({job_id: jobId, date_from: dateFrom, date_to: dateTo})
+            });
+            const data = await res.json();
+            el.textContent = `${data.files.toLocaleString()} files, ${data.size}`;
+            el.style.color = 'var(--accent)';
+        }
+
         async function startBackup(jobId) {
-            const res = await fetch(`/api/backup/${jobId}`, {method: 'POST'});
+            const dateFrom = document.getElementById(`date-from-${jobId}`)?.value || '';
+            const dateTo = document.getElementById(`date-to-${jobId}`)?.value || '';
+
+            const res = await fetch(`/api/backup/${jobId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({date_from: dateFrom, date_to: dateTo})
+            });
             const data = await res.json();
             if (res.ok) {
-                toast('Backup started', 'success');
+                let msg = 'Backup started';
+                if (dateFrom || dateTo) msg += ` (filtered: ${dateFrom || 'any'} to ${dateTo || 'now'})`;
+                toast(msg, 'success');
                 pollStatus(jobId);
             } else {
                 toast(data.error || 'Failed to start', 'error');
@@ -264,7 +348,7 @@
             closeModal('addJobModal');
             toast('Job added', 'success');
             await loadConfig();
-            loadSizes();
+            refreshSizes();
         }
 
         async function deleteJob(jobId) {
