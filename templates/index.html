@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PapaBackup</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <h1><span>Papa</span>Backup</h1>
+        <div class="header-right">
+            <div id="gdriveStatus" class="gdrive-status disconnected">Google Drive: checking...</div>
+            <button class="btn btn-secondary btn-sm" onclick="showGdriveSetup()">Setup Google Drive</button>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="section-title">Backup Jobs</div>
+        <div id="jobsGrid" class="jobs-grid"></div>
+
+        <div class="section-title">Custom Jobs</div>
+        <div id="customJobsGrid" class="jobs-grid"></div>
+        <div class="add-job-section">
+            <button class="add-job-btn" onclick="showAddJobModal()">+ Add Custom Backup Job</button>
+        </div>
+    </div>
+
+    <div id="addJobModal" class="modal-overlay">
+        <div class="modal">
+            <h3>Add Custom Backup Job</h3>
+            <div class="form-group">
+                <label>Job Name</label>
+                <input type="text" id="newJobName" placeholder="My Backup">
+            </div>
+            <div class="form-group">
+                <label>Source Paths</label>
+                <textarea id="newJobSources" placeholder="/path/to/folder&#10;/another/path"></textarea>
+                <div class="help">One path per line</div>
+            </div>
+            <div class="form-group">
+                <label>Exclude Patterns</label>
+                <textarea id="newJobExcludes" placeholder="node_modules&#10;.cache"></textarea>
+                <div class="help">One pattern per line (optional)</div>
+            </div>
+            <div class="form-group">
+                <label>Local Destination</label>
+                <input type="text" id="newJobDest" placeholder="/mnt/backup/custom">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal('addJobModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="addCustomJob()">Add Job</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="logModal" class="modal-overlay">
+        <div class="modal log-modal">
+            <h3 id="logModalTitle">Backup Log</h3>
+            <div id="logContent" class="log-content">No logs yet.</div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal('logModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="gdriveModal" class="modal-overlay">
+        <div class="modal">
+            <h3>Google Drive Setup</h3>
+            <p style="color: var(--text-dim); font-size: 0.85rem; margin-bottom: 1rem;">
+                PapaBackup uses <strong>rclone</strong> to sync files to Google Drive. Follow these steps in your terminal:
+            </p>
+            <ol id="gdriveInstructions" class="gdrive-instructions"></ol>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal('gdriveModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+        let config = null;
+        let sizes = {};
+        let statusTimers = {};
+
+        async function loadConfig() {
+            const res = await fetch('/api/config');
+            config = await res.json();
+            renderJobs();
+        }
+
+        async function loadSizes() {
+            const res = await fetch('/api/sizes');
+            sizes = await res.json();
+            renderJobs();
+        }
+
+        async function checkGdrive() {
+            const res = await fetch('/api/gdrive/status');
+            const data = await res.json();
+            const el = document.getElementById('gdriveStatus');
+            if (data.remote_configured) {
+                el.className = 'gdrive-status connected';
+                el.textContent = `Google Drive: Connected (${data.remote_name})`;
+            } else if (data.rclone_installed) {
+                el.className = 'gdrive-status disconnected';
+                el.textContent = 'Google Drive: Not configured';
+            } else {
+                el.className = 'gdrive-status disconnected';
+                el.textContent = 'Google Drive: rclone not installed';
+            }
+        }
+
+        function renderJobs() {
+            if (!config) return;
+            renderJobList('jobsGrid', config.backup_jobs, false);
+            renderJobList('customJobsGrid', config.custom_jobs || [], true);
+        }
+
+        function renderJobList(containerId, jobs, isCustom) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+            if (jobs.length === 0 && isCustom) {
+                container.innerHTML = '<div style="color: var(--text-dim); font-size: 0.85rem;">No custom jobs yet.</div>';
+                return;
+            }
+            jobs.forEach(job => {
+                const card = document.createElement('div');
+                card.className = `job-card${job.enabled ? '' : ' disabled'}`;
+                card.innerHTML = `
+                    <div class="job-header">
+                        <div class="job-name">${esc(job.name)}</div>
+                        <label class="job-toggle">
+                            <input type="checkbox" ${job.enabled ? 'checked' : ''} onchange="toggleJob('${job.id}', this.checked)">
+                            <div class="slider"></div>
+                        </label>
+                    </div>
+                    <div class="job-sources">
+                        ${job.sources.map(s => `<div title="${esc(s)}">${esc(s)}</div>`).join('')}
+                    </div>
+                    <div class="job-size">Size: ${sizes[job.id] || 'calculating...'}</div>
+                    <div class="job-dest">
+                        <label>Local Destination</label>
+                        <input type="text" value="${esc(job.destination || '')}" placeholder="/mnt/backup/${job.id}"
+                               onchange="updateDest('${job.id}', this.value)">
+                    </div>
+                    <div class="job-options">
+                        <label><input type="checkbox" ${job.use_local ? 'checked' : ''} onchange="updateOption('${job.id}', 'use_local', this.checked)"> Local</label>
+                        <label><input type="checkbox" ${job.use_gdrive ? 'checked' : ''} onchange="updateOption('${job.id}', 'use_gdrive', this.checked)"> Google Drive</label>
+                    </div>
+                    <div class="job-actions">
+                        <button class="btn btn-primary btn-sm" onclick="startBackup('${job.id}')" ${job.enabled ? '' : 'disabled'}>Backup Now</button>
+                        <button class="btn btn-secondary btn-sm" onclick="showLog('${job.id}', '${esc(job.name)}')">Logs</button>
+                        ${isCustom ? `<button class="btn btn-danger btn-sm" onclick="deleteJob('${job.id}')">Delete</button>` : ''}
+                        <div class="job-status" id="status-${job.id}">
+                            <span class="status-dot idle"></span> idle
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+                checkStatus(job.id);
+            });
+        }
+
+        function esc(s) {
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        async function toggleJob(jobId, enabled) {
+            await fetch(`/api/job/${jobId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled})
+            });
+            await loadConfig();
+        }
+
+        async function updateDest(jobId, destination) {
+            await fetch(`/api/job/${jobId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({destination})
+            });
+            toast('Destination updated', 'success');
+        }
+
+        async function updateOption(jobId, key, value) {
+            const update = {};
+            update[key] = value;
+            await fetch(`/api/job/${jobId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(update)
+            });
+        }
+
+        async function startBackup(jobId) {
+            const res = await fetch(`/api/backup/${jobId}`, {method: 'POST'});
+            const data = await res.json();
+            if (res.ok) {
+                toast('Backup started', 'success');
+                pollStatus(jobId);
+            } else {
+                toast(data.error || 'Failed to start', 'error');
+            }
+        }
+
+        function pollStatus(jobId) {
+            if (statusTimers[jobId]) clearInterval(statusTimers[jobId]);
+            statusTimers[jobId] = setInterval(() => checkStatus(jobId), 2000);
+        }
+
+        async function checkStatus(jobId) {
+            const res = await fetch(`/api/backup/${jobId}/status`);
+            const data = await res.json();
+            const el = document.getElementById(`status-${jobId}`);
+            if (!el) return;
+
+            const status = data.status || 'idle';
+            el.innerHTML = `<span class="status-dot ${status}"></span> ${status}`;
+            if (data.progress) el.innerHTML += ` - ${esc(data.progress)}`;
+
+            if (status !== 'running' && statusTimers[jobId]) {
+                clearInterval(statusTimers[jobId]);
+                delete statusTimers[jobId];
+            }
+        }
+
+        async function showLog(jobId, name) {
+            document.getElementById('logModalTitle').textContent = `${name} - Backup Log`;
+            const res = await fetch(`/api/backup/${jobId}/log`);
+            const data = await res.json();
+            document.getElementById('logContent').textContent = data.log || 'No logs yet.';
+            document.getElementById('logModal').classList.add('active');
+        }
+
+        function showAddJobModal() {
+            document.getElementById('newJobName').value = '';
+            document.getElementById('newJobSources').value = '';
+            document.getElementById('newJobExcludes').value = '';
+            document.getElementById('newJobDest').value = '';
+            document.getElementById('addJobModal').classList.add('active');
+        }
+
+        async function addCustomJob() {
+            const name = document.getElementById('newJobName').value.trim();
+            const sources = document.getElementById('newJobSources').value.trim().split('\n').filter(s => s.trim());
+            const excludes = document.getElementById('newJobExcludes').value.trim().split('\n').filter(s => s.trim());
+            const dest = document.getElementById('newJobDest').value.trim();
+
+            if (!name || sources.length === 0) {
+                toast('Name and at least one source required', 'error');
+                return;
+            }
+
+            await fetch('/api/job/custom', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name, sources, excludes, destination: dest})
+            });
+            closeModal('addJobModal');
+            toast('Job added', 'success');
+            await loadConfig();
+            loadSizes();
+        }
+
+        async function deleteJob(jobId) {
+            if (!confirm('Delete this backup job?')) return;
+            await fetch(`/api/job/${jobId}/delete`, {method: 'POST'});
+            toast('Job deleted', 'success');
+            await loadConfig();
+        }
+
+        async function showGdriveSetup() {
+            const res = await fetch('/api/gdrive/setup', {method: 'POST'});
+            const data = await res.json();
+            const list = document.getElementById('gdriveInstructions');
+            list.innerHTML = data.instructions.map(i => `<li>${esc(i)}</li>`).join('');
+            document.getElementById('gdriveModal').classList.add('active');
+        }
+
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+
+        function toast(msg, type) {
+            const el = document.getElementById('toast');
+            el.textContent = msg;
+            el.className = `toast ${type} show`;
+            setTimeout(() => el.classList.remove('show'), 3000);
+        }
+
+        document.querySelectorAll('.modal-overlay').forEach(m => {
+            m.addEventListener('click', e => {
+                if (e.target === m) m.classList.remove('active');
+            });
+        });
+
+        loadConfig();
+        loadSizes();
+        checkGdrive();
+    </script>
+</body>
+</html>
