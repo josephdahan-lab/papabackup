@@ -2,7 +2,7 @@
 
 A self-hosted backup utility with a web interface for managing backups of your Linux servers and files.
 
-**Version 2.0**
+**Version 2.1**
 
 ## Features
 
@@ -15,7 +15,10 @@ A self-hosted backup utility with a web interface for managing backups of your L
 - **Local Backup** — Rsync-based local/network backups with `--delete` mirroring
 - **Date Range Filtering** — Back up only files modified within a specific date range
 - **File Preview** — See the exact list of files before running a backup
-- **Per-Source Toggle** — Include or exclude individual source directories per job
+- **Per-Source Toggle** — Include or exclude individual source directories per job, with per-directory size display
+- **Live Progress** — Real-time upload/sync percentage, speed, and ETA during backups
+- **Last Backup Tracking** — Each job shows when it was last backed up and whether it succeeded
+- **Per-Job Size Refresh** — Recalculate sizes per job with a dedicated Refresh button
 - **Light/Dark Theme** — Toggle between light and dark UI themes
 - **Live Logs** — View backup progress and logs in real time
 

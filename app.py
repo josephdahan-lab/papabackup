@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -363,6 +364,64 @@ def get_active_sources(job):
     return [s for s in job.get("sources", []) if s not in excluded]
 
 
+def run_cmd_with_progress(job_id, cmd, source_name, progress_prefix):
+    """Run a subprocess and parse progress from its output in real time."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1
+    )
+    last_progress = ""
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        # rclone --stats-one-line format: "Transferred: 1.2 GiB / 3.4 GiB, 35%, 12.3 MiB/s, ETA 2m30s"
+        m = re.search(r"Transferred:\s*[\d.]+ \S+ / ([\d.]+ \S+),\s*(\d+)%.*ETA\s*(\S+)", line)
+        if m:
+            total, pct, eta = m.group(1), m.group(2), m.group(3)
+            last_progress = f"{progress_prefix} {source_name}: {pct}% of {total} (ETA {eta})"
+            running_jobs[job_id]["progress"] = last_progress
+            continue
+        # rclone transferred count: "Transferred: 5 / 10, 50%"
+        m2 = re.search(r"Transferred:\s*(\d+)\s*/\s*(\d+),\s*(\d+)%", line)
+        if m2:
+            done, total_f, pct = m2.group(1), m2.group(2), m2.group(3)
+            last_progress = f"{progress_prefix} {source_name}: {pct}% ({done}/{total_f} files)"
+            running_jobs[job_id]["progress"] = last_progress
+            continue
+        # rsync progress: "  1,234,567  45%  12.34MB/s  0:01:23"
+        m3 = re.search(r"(\d+)%\s+([\d.]+\S+/s)\s+(\S+)", line)
+        if m3:
+            pct, speed, eta = m3.group(1), m3.group(2), m3.group(3)
+            last_progress = f"{progress_prefix} {source_name}: {pct}% ({speed}, ETA {eta})"
+            running_jobs[job_id]["progress"] = last_progress
+            continue
+        # rsync xfr line: "xfr#5, to-chk=10/20"
+        m4 = re.search(r"to-chk=(\d+)/(\d+)", line)
+        if m4:
+            remaining, total_f = int(m4.group(1)), int(m4.group(2))
+            done = total_f - remaining
+            pct = int(done / total_f * 100) if total_f > 0 else 0
+            last_progress = f"{progress_prefix} {source_name}: {pct}% ({done}/{total_f} files)"
+            running_jobs[job_id]["progress"] = last_progress
+            continue
+        append_log(job_id, line)
+    proc.wait()
+    return proc.returncode
+
+
+def save_last_backup(job_id, success):
+    """Save last backup timestamp to config."""
+    config = load_config()
+    all_jobs = config["backup_jobs"] + config.get("custom_jobs", [])
+    for job in all_jobs:
+        if job["id"] == job_id:
+            job["last_backup"] = datetime.now().isoformat()
+            job["last_backup_ok"] = success
+            break
+    save_config(config)
+
+
 def run_backup(job, date_from=None, date_to=None):
     job_id = job["id"]
     running_jobs[job_id] = {
@@ -376,6 +435,7 @@ def run_backup(job, date_from=None, date_to=None):
         date_info = f" (date filter: {date_from or 'any'} to {date_to or 'now'})"
     append_log(job_id, f"=== Backup started for {job['name']}{date_info} ===")
 
+    had_error = False
     stopped_containers = []
     try:
         if job.get("stop_container") and job.get("containers"):
@@ -418,13 +478,12 @@ def run_backup(job, date_from=None, date_to=None):
                 append_log(job_id, f"rsync: {source} -> {target}")
                 running_jobs[job_id]["progress"] = f"Syncing {source_name}..."
 
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=86400
-                )
-                if result.returncode == 0:
+                rc = run_cmd_with_progress(job_id, cmd, source_name, "Syncing")
+                if rc == 0:
                     append_log(job_id, f"Completed: {source_name}")
                 else:
-                    append_log(job_id, f"rsync error for {source_name}: {result.stderr[-500:]}")
+                    append_log(job_id, f"rsync error for {source_name} (exit code {rc})")
+                    had_error = True
 
         if job.get("use_gdrive") and job.get("google_drive_path"):
             config = load_config()
@@ -442,7 +501,10 @@ def run_backup(job, date_from=None, date_to=None):
                     source_name = os.path.basename(source.rstrip("/"))
                     remote_dest = f"{remote}:{gdrive_path}/{source_name}"
 
-                    cmd = ["rclone", "sync", source, remote_dest, "--progress", "-v"]
+                    cmd = [
+                        "rclone", "sync", source, remote_dest,
+                        "--stats", "1s", "--stats-one-line", "-v",
+                    ]
                     for exc in job.get("excludes", []):
                         cmd.extend(["--exclude", exc])
 
@@ -454,13 +516,12 @@ def run_backup(job, date_from=None, date_to=None):
                     append_log(job_id, f"rclone sync: {source} -> {remote_dest}")
                     running_jobs[job_id]["progress"] = f"Uploading {source_name} to Google Drive..."
 
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=86400
-                    )
-                    if result.returncode == 0:
+                    rc = run_cmd_with_progress(job_id, cmd, source_name, "Uploading")
+                    if rc == 0:
                         append_log(job_id, f"Google Drive upload complete: {source_name}")
                     else:
-                        append_log(job_id, f"rclone error: {result.stderr[-500:]}")
+                        append_log(job_id, f"rclone error for {source_name} (exit code {rc})")
+                        had_error = True
 
         append_log(job_id, f"=== Backup completed for {job['name']} ===")
         running_jobs[job_id]["status"] = "completed"
@@ -468,6 +529,7 @@ def run_backup(job, date_from=None, date_to=None):
     except Exception as e:
         append_log(job_id, f"ERROR: {str(e)}")
         running_jobs[job_id]["status"] = "failed"
+        had_error = True
     finally:
         if stopped_containers:
             append_log(job_id, "Restarting containers...")
@@ -482,6 +544,7 @@ def run_backup(job, date_from=None, date_to=None):
                     append_log(job_id, f"WARNING: failed to start {container}: {result.stderr.strip()}")
 
     running_jobs[job_id]["finished"] = datetime.now().isoformat()
+    save_last_backup(job_id, not had_error)
 
 
 @app.route("/")
@@ -605,6 +668,57 @@ def refresh_sizes():
     if sizes_computing:
         return jsonify({"status": "already_computing"})
     thread = threading.Thread(target=compute_all_sizes, daemon=True)
+    thread.start()
+    return jsonify({"status": "started"})
+
+
+def compute_job_sizes(job_id):
+    """Compute sizes for a single job."""
+    global sizes_computing
+    config = load_config()
+    all_jobs = config["backup_jobs"] + config.get("custom_jobs", [])
+    job = next((j for j in all_jobs if j["id"] == job_id), None)
+    if not job:
+        return
+
+    per_source = []
+    total_bytes = 0
+
+    for src in get_active_sources(job):
+        if not os.path.exists(src):
+            continue
+        if os.path.isfile(src):
+            sz = os.path.getsize(src)
+            total_bytes += sz
+            per_source.append({"path": src, "size": format_size(sz)})
+            continue
+        try:
+            du_cmd = ["du", "-sb"]
+            for exc in job.get("excludes", []):
+                du_cmd.append(f"--exclude={exc}")
+            du_cmd.append(src)
+            result = subprocess.run(
+                du_cmd, capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0:
+                sz = int(result.stdout.split()[0])
+                total_bytes += sz
+                per_source.append({"path": src, "size": format_size(sz)})
+        except Exception:
+            per_source.append({"path": src, "size": "unknown"})
+
+    with sizes_lock:
+        cached_sizes[job_id] = {
+            "total": format_size(total_bytes),
+            "sources": per_source,
+            "computed_at": datetime.now().isoformat(),
+        }
+        save_sizes_cache()
+
+
+@app.route("/api/sizes/refresh/<job_id>", methods=["POST"])
+def refresh_job_sizes(job_id):
+    thread = threading.Thread(target=compute_job_sizes, args=(job_id,), daemon=True)
     thread.start()
     return jsonify({"status": "started"})
 

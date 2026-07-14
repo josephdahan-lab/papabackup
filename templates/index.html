@@ -24,13 +24,7 @@
     </div>
 
     <div class="container">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
-            <div class="section-title" style="margin-bottom: 0;">Backup Jobs</div>
-            <div style="display: flex; align-items: center; gap: 0.75rem;">
-                <span id="sizesStatus" style="font-size: 0.75rem; color: var(--text-dim);"></span>
-                <button class="btn btn-secondary btn-sm" onclick="refreshSizes()">Recalculate Sizes</button>
-            </div>
-        </div>
+        <div class="section-title">Backup Jobs</div>
         <div id="jobsGrid" class="jobs-grid"></div>
 
         <div class="section-title">Custom Jobs</div>
@@ -121,29 +115,29 @@
             const res = await fetch('/api/sizes');
             const data = await res.json();
             sizesData = data.sizes || {};
-            const statusEl = document.getElementById('sizesStatus');
             if (data.computing) {
-                statusEl.textContent = 'Calculating sizes...';
-                statusEl.style.color = 'var(--yellow)';
                 setTimeout(loadSizes, 3000);
-            } else {
-                const anySize = Object.values(sizesData)[0];
-                if (anySize && anySize.computed_at) {
-                    const t = new Date(anySize.computed_at);
-                    statusEl.textContent = `Last calculated: ${t.toLocaleString()}`;
-                    statusEl.style.color = 'var(--text-dim)';
-                } else {
-                    statusEl.textContent = '';
-                }
             }
             renderJobs();
         }
 
-        async function refreshSizes() {
-            await fetch('/api/sizes/refresh', {method: 'POST'});
-            document.getElementById('sizesStatus').textContent = 'Calculating sizes...';
-            document.getElementById('sizesStatus').style.color = 'var(--yellow)';
-            setTimeout(loadSizes, 2000);
+        async function refreshJobSizes(jobId, btn) {
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '...';
+            }
+            await fetch(`/api/sizes/refresh/${jobId}`, {method: 'POST'});
+            const poll = async () => {
+                const res = await fetch('/api/sizes');
+                const data = await res.json();
+                sizesData = data.sizes || {};
+                if (!data.computing) {
+                    renderJobs();
+                    return;
+                }
+                setTimeout(poll, 1500);
+            };
+            setTimeout(poll, 2000);
         }
 
         async function checkGdrive() {
@@ -177,11 +171,15 @@
             }
             jobs.forEach(job => {
                 const sizeInfo = sizesData[job.id];
-                const sizeDisplay = sizeInfo ? sizeInfo.total : 'pending...';
-                const sourceDetails = sizeInfo && sizeInfo.sources
-                    ? sizeInfo.sources.map(s => `${s.size} — ${s.path}`).join('\n')
-                    : '';
+                const sizeDisplay = sizeInfo ? sizeInfo.total : '...';
+                const sourceSizeMap = {};
+                if (sizeInfo && sizeInfo.sources) {
+                    sizeInfo.sources.forEach(s => { sourceSizeMap[s.path] = s.size; });
+                }
                 const hasDateFilter = job.date_filter || false;
+                const sizeTimestamp = sizeInfo && sizeInfo.computed_at
+                    ? new Date(sizeInfo.computed_at).toLocaleString()
+                    : '';
 
                 const card = document.createElement('div');
                 card.className = `job-card${job.enabled ? '' : ' disabled'}`;
@@ -198,15 +196,20 @@
                             const excluded = (job.excluded_sources || []).includes(s);
                             const shortName = s.endsWith('/') ? s.split('/').filter(Boolean).pop() + '/' : s.split('/').pop();
                             const safeSource = s.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+                            const srcSize = sourceSizeMap[s];
+                            const sizeTag = srcSize && !excluded ? `<span class="source-size">${esc(srcSize)}</span>` : '';
                             return `<label class="source-item${excluded ? ' excluded' : ''}" title="${esc(s)}">
                                 <input type="checkbox" ${excluded ? '' : 'checked'} data-job="${job.id}" data-source="${safeSource}" onchange="toggleSource(this.dataset.job, this.dataset.source, this.checked)">
-                                <span class="source-path">${esc(shortName)}</span>
+                                <span class="source-path">${esc(shortName)}</span>${sizeTag}
                             </label>`;
                         }).join('')}
                     </div>
-                    <div class="job-size" title="${esc(sourceDetails)}">
-                        Size: <strong>${esc(sizeDisplay)}</strong>
-                        <span style="font-size: 0.7rem; color: var(--text-dim);">(excl. thumbs, encoded-video)</span>
+                    <div class="job-size-row">
+                        <div class="job-size">Total: <strong>${esc(sizeDisplay)}</strong></div>
+                        <div class="job-size-actions">
+                            <span class="job-size-time" title="${esc(sizeTimestamp)}">${sizeTimestamp ? esc(sizeTimestamp) : ''}</span>
+                            <button class="btn btn-secondary btn-sm" onclick="refreshJobSizes('${job.id}', this)">Refresh</button>
+                        </div>
                     </div>
                     ${hasDateFilter ? `
                     <div class="date-filter">
@@ -230,6 +233,11 @@
                         <label><input type="checkbox" ${job.use_gdrive ? 'checked' : ''} onchange="updateOption('${job.id}', 'use_gdrive', this.checked)"> Google Drive</label>
                         ${job.containers ? `<label title="Stop containers before backup for a consistent snapshot (zero-risk method)"><input type="checkbox" ${job.stop_container ? 'checked' : ''} onchange="updateOption('${job.id}', 'stop_container', this.checked)"> Stop containers</label>` : ''}
                     </div>
+                    ${job.last_backup ? `
+                    <div class="last-backup ${job.last_backup_ok ? 'ok' : 'fail'}">
+                        ${job.last_backup_ok ? '&#10003;' : '&#10007;'} Last backup: ${new Date(job.last_backup).toLocaleString()}${job.last_backup_ok ? '' : ' (failed)'}
+                    </div>
+                    ` : `<div class="last-backup none">No backup recorded</div>`}
                     <div class="job-actions">
                         <button class="btn btn-primary btn-sm" onclick="startBackup('${job.id}')" ${job.enabled ? '' : 'disabled'}>Backup Now</button>
                         <button class="btn btn-secondary btn-sm" onclick="showLog('${job.id}', '${esc(job.name)}')">Logs</button>
@@ -398,12 +406,16 @@
             if (!el) return;
 
             const status = data.status || 'idle';
-            el.innerHTML = `<span class="status-dot ${status}"></span> ${status}`;
-            if (data.progress) el.innerHTML += ` - ${esc(data.progress)}`;
+            if (status === 'running' && data.progress) {
+                el.innerHTML = `<span class="status-dot running"></span> ${esc(data.progress)}`;
+            } else {
+                el.innerHTML = `<span class="status-dot ${status}"></span> ${status}`;
+            }
 
             if (status !== 'running' && statusTimers[jobId]) {
                 clearInterval(statusTimers[jobId]);
                 delete statusTimers[jobId];
+                loadConfig();
             }
         }
 
