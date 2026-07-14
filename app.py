@@ -248,7 +248,7 @@ def compute_all_sizes():
         per_source = []
         total_bytes = 0
 
-        for src in job.get("sources", []):
+        for src in get_active_sources(job):
             if not os.path.exists(src):
                 continue
             if os.path.isfile(src):
@@ -358,6 +358,11 @@ def build_rsync_cmd(job, source, target, date_from=None, date_to=None):
     return cmd, None
 
 
+def get_active_sources(job):
+    excluded = set(job.get("excluded_sources", []))
+    return [s for s in job.get("sources", []) if s not in excluded]
+
+
 def run_backup(job, date_from=None, date_to=None):
     job_id = job["id"]
     running_jobs[job_id] = {
@@ -391,7 +396,7 @@ def run_backup(job, date_from=None, date_to=None):
             append_log(job_id, f"Backing up to local destination: {dest}")
             os.makedirs(dest, exist_ok=True)
 
-            for source in job.get("sources", []):
+            for source in get_active_sources(job):
                 if not os.path.exists(source):
                     append_log(job_id, f"Source not found, skipping: {source}")
                     continue
@@ -429,7 +434,7 @@ def run_backup(job, date_from=None, date_to=None):
             if not check_rclone_remote(remote):
                 append_log(job_id, "Google Drive remote not configured in rclone. Skipping.")
             else:
-                for source in job.get("sources", []):
+                for source in get_active_sources(job):
                     if not os.path.exists(source):
                         append_log(job_id, f"Source not found, skipping: {source}")
                         continue
@@ -442,9 +447,9 @@ def run_backup(job, date_from=None, date_to=None):
                         cmd.extend(["--exclude", exc])
 
                     if date_from:
-                        cmd.extend(["--min-age", f"{date_from}"])
+                        cmd.extend(["--max-age", f"{date_from}"])
                     if date_to:
-                        cmd.extend(["--max-age", f"{date_to}"])
+                        cmd.extend(["--min-age", f"{date_to}"])
 
                     append_log(job_id, f"rclone sync: {source} -> {remote_dest}")
                     running_jobs[job_id]["progress"] = f"Uploading {source_name} to Google Drive..."
@@ -620,32 +625,7 @@ def get_filtered_size():
 
     total_bytes = 0
     total_files = 0
-    for src in job.get("sources", []):
-        if not os.path.exists(src):
-            continue
-        if os.path.isfile(src):
-            mtime = datetime.fromtimestamp(os.path.getmtime(src))
-            include = True
-            if date_from:
-                include = include and mtime >= datetime.fromisoformat(date_from)
-            if date_to:
-                include = include and mtime <= datetime.fromisoformat(date_to)
-            if include:
-                total_bytes += os.path.getsize(src)
-                total_files += 1
-            continue
-
-        size_str = get_dir_size_with_dates(src, date_from or None, date_to or None)
-        file_count = count_files_with_dates(src, date_from or None, date_to or None)
-        total_files += file_count
-        if size_str != "unknown":
-            # parse back - this is approximate
-            pass
-
-    # Do it properly with a single pass
-    total_bytes = 0
-    total_files = 0
-    for src in job.get("sources", []):
+    for src in get_active_sources(job):
         if not os.path.exists(src):
             continue
         if os.path.isfile(src):
@@ -657,7 +637,7 @@ def get_filtered_size():
             cmd.extend(["-newermt", date_from])
         if date_to:
             cmd.extend(["!", "-newermt", date_to])
-        for exc in BACKUP_FILE_EXCLUDES:
+        for exc in job.get("excludes", []):
             if exc.endswith("/"):
                 cmd.extend(["-not", "-path", f"*/{exc}*"])
             elif exc.startswith("*"):
@@ -676,6 +656,82 @@ def get_filtered_size():
         "size": format_size(total_bytes),
         "files": total_files,
         "bytes": total_bytes,
+    })
+
+
+@app.route("/api/files/filtered", methods=["POST"])
+def get_filtered_files():
+    """Get the exact list of files that would be backed up for a date range."""
+    data = request.json
+    job_id = data.get("job_id")
+    date_from = data.get("date_from", "")
+    date_to = data.get("date_to", "")
+
+    config = load_config()
+    all_jobs = config["backup_jobs"] + config.get("custom_jobs", [])
+    job = next((j for j in all_jobs if j["id"] == job_id), None)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    files = []
+    for src in get_active_sources(job):
+        if not os.path.exists(src):
+            continue
+        if os.path.isfile(src):
+            mtime = datetime.fromtimestamp(os.path.getmtime(src))
+            include = True
+            if date_from:
+                include = include and mtime >= datetime.fromisoformat(date_from)
+            if date_to:
+                include = include and mtime <= datetime.fromisoformat(date_to)
+            if include:
+                sz = os.path.getsize(src)
+                files.append({
+                    "path": src,
+                    "size": sz,
+                    "size_fmt": format_size(sz),
+                    "mtime": mtime.strftime("%Y-%m-%d %H:%M"),
+                })
+            continue
+
+        cmd = ["find", src, "-type", "f"]
+        if date_from:
+            cmd.extend(["-newermt", date_from])
+        if date_to:
+            cmd.extend(["!", "-newermt", date_to])
+        for exc in job.get("excludes", []):
+            if exc.endswith("/"):
+                cmd.extend(["-not", "-path", f"*/{exc}*"])
+            elif exc.startswith("*"):
+                cmd.extend(["-not", "-name", exc])
+        cmd.extend(["-printf", "%p\\t%s\\t%T@\\n"])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        fpath = parts[0]
+                        sz = int(parts[1])
+                        ts = float(parts[2])
+                        files.append({
+                            "path": fpath,
+                            "size": sz,
+                            "size_fmt": format_size(sz),
+                            "mtime": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M"),
+                        })
+        except Exception:
+            pass
+
+    files.sort(key=lambda f: f["path"])
+    total_bytes = sum(f["size"] for f in files)
+    return jsonify({
+        "files": files,
+        "total_files": len(files),
+        "total_size": format_size(total_bytes),
+        "total_bytes": total_bytes,
     })
 
 

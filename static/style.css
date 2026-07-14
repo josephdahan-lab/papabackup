@@ -1,6 +1,6 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-:root {
+:root, [data-theme="dark"] {
     --bg: #0f1117;
     --surface: #1a1d27;
     --surface2: #242836;
@@ -13,6 +13,23 @@
     --red: #f87171;
     --yellow: #fbbf24;
     --orange: #fb923c;
+    color-scheme: dark;
+}
+
+[data-theme="light"] {
+    --bg: #f0f2f5;
+    --surface: #ffffff;
+    --surface2: #e8ebf0;
+    --border: #d0d5dd;
+    --text: #1a1d27;
+    --text-dim: #5f6577;
+    --accent: #4a5cd9;
+    --accent-hover: #3b4bc8;
+    --green: #16a34a;
+    --red: #dc2626;
+    --yellow: #ca8a04;
+    --orange: #ea580c;
+    color-scheme: light;
 }
 
 body {
@@ -135,18 +152,51 @@ body {
 .job-toggle input:checked + .slider { background: var(--accent); }
 .job-toggle input:checked + .slider::after { transform: translateX(18px); background: white; }
 
-.job-sources {
-    font-size: 0.8rem;
-    color: var(--text-dim);
+
+.job-sources-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
     margin-bottom: 0.75rem;
-    max-height: 60px;
-    overflow: hidden;
 }
 
-.job-sources div {
+.source-item {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.78rem;
+    color: var(--text);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.25rem 0.5rem;
+    cursor: pointer;
+    transition: opacity 0.2s, border-color 0.2s;
+    user-select: none;
+}
+
+.source-item:hover {
+    border-color: var(--accent);
+}
+
+.source-item.excluded {
+    opacity: 0.4;
+    text-decoration: line-through;
+}
+
+.source-item input[type="checkbox"] {
+    accent-color: var(--accent);
+    margin: 0;
+    width: 13px;
+    height: 13px;
+    cursor: pointer;
+}
+
+.source-path {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    max-width: 200px;
 }
 
 .job-size {
@@ -400,10 +450,130 @@ body {
     font-family: inherit;
     outline: none;
     flex: 1;
-    color-scheme: dark;
 }
 
 .date-input:focus { border-color: var(--accent); }
+
+.theme-toggle {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
+    color: var(--text);
+    font-size: 1rem;
+    line-height: 1;
+    transition: border-color 0.2s, background 0.2s;
+    display: flex;
+    align-items: center;
+}
+
+.theme-toggle:hover {
+    border-color: var(--accent);
+}
+
+.filelist-modal {
+    max-width: 800px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.filelist-header {
+    flex-shrink: 0;
+    margin-bottom: 0.75rem;
+}
+
+.filelist-summary {
+    display: flex;
+    gap: 1rem;
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+}
+
+.filelist-range {
+    color: var(--text-dim);
+}
+
+.filelist-count {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.filelist-total {
+    color: var(--green);
+    font-weight: 600;
+}
+
+.filelist-content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.filelist-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.filelist-table thead {
+    position: sticky;
+    top: 0;
+    background: var(--surface2);
+    z-index: 1;
+}
+
+.filelist-table th {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border);
+}
+
+.filelist-table td {
+    padding: 0.35rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+}
+
+.filelist-table tbody tr:hover {
+    background: var(--surface2);
+}
+
+.filelist-path {
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text) !important;
+}
+
+.filelist-size {
+    white-space: nowrap;
+    text-align: right;
+    color: var(--accent) !important;
+}
+
+.filelist-mtime {
+    white-space: nowrap;
+    color: var(--text-dim) !important;
+}
+
+.filelist-empty {
+    padding: 2rem;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+}
 
 @media (max-width: 768px) {
     .container { padding: 1rem; }

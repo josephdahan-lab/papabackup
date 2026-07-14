@@ -4,7 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PapaBackup</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/style.css">
+    <script>
+        (function() {
+            var t = localStorage.getItem('papabackup-theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
 </head>
 <body>
     <div class="header">
@@ -12,6 +19,7 @@
         <div class="header-right">
             <div id="gdriveStatus" class="gdrive-status disconnected">Google Drive: checking...</div>
             <button class="btn btn-secondary btn-sm" onclick="showGdriveSetup()">Setup Google Drive</button>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="themeBtn">&#9790;</button>
         </div>
     </div>
 
@@ -79,6 +87,19 @@
             <ol id="gdriveInstructions" class="gdrive-instructions"></ol>
             <div class="modal-actions">
                 <button class="btn btn-secondary" onclick="closeModal('gdriveModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="fileListModal" class="modal-overlay">
+        <div class="modal filelist-modal">
+            <div class="filelist-header">
+                <h3 id="fileListTitle">Files to back up</h3>
+                <div id="fileListSummary" class="filelist-summary"></div>
+            </div>
+            <div id="fileListContent" class="filelist-content"></div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal('fileListModal')">Close</button>
             </div>
         </div>
     </div>
@@ -172,8 +193,16 @@
                             <div class="slider"></div>
                         </label>
                     </div>
-                    <div class="job-sources">
-                        ${job.sources.map(s => `<div title="${esc(s)}">${esc(s)}</div>`).join('')}
+                    <div class="job-sources-list">
+                        ${job.sources.map(s => {
+                            const excluded = (job.excluded_sources || []).includes(s);
+                            const shortName = s.endsWith('/') ? s.split('/').filter(Boolean).pop() + '/' : s.split('/').pop();
+                            const safeSource = s.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+                            return `<label class="source-item${excluded ? ' excluded' : ''}" title="${esc(s)}">
+                                <input type="checkbox" ${excluded ? '' : 'checked'} data-job="${job.id}" data-source="${safeSource}" onchange="toggleSource(this.dataset.job, this.dataset.source, this.checked)">
+                                <span class="source-path">${esc(shortName)}</span>
+                            </label>`;
+                        }).join('')}
                     </div>
                     <div class="job-size" title="${esc(sourceDetails)}">
                         Size: <strong>${esc(sizeDisplay)}</strong>
@@ -249,6 +278,36 @@
             });
         }
 
+        async function toggleSource(jobId, source, included) {
+            const allJobs = [...(config.backup_jobs || []), ...(config.custom_jobs || [])];
+            const job = allJobs.find(j => j.id === jobId);
+            if (!job) return;
+
+            let excluded = job.excluded_sources || [];
+            if (included) {
+                excluded = excluded.filter(s => s !== source);
+            } else {
+                if (!excluded.includes(source)) excluded.push(source);
+            }
+            job.excluded_sources = excluded;
+
+            const dateFrom = document.getElementById(`date-from-${jobId}`)?.value || '';
+            const dateTo = document.getElementById(`date-to-${jobId}`)?.value || '';
+
+            await fetch(`/api/job/${jobId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({excluded_sources: excluded, date_from: dateFrom, date_to: dateTo})
+            });
+            job.date_from = dateFrom;
+            job.date_to = dateTo;
+            renderJobs();
+
+            if (dateFrom || dateTo) {
+                estimateSize(jobId);
+            }
+        }
+
         async function estimateSize(jobId) {
             const dateFrom = document.getElementById(`date-from-${jobId}`)?.value || '';
             const dateTo = document.getElementById(`date-to-${jobId}`)?.value || '';
@@ -260,17 +319,51 @@
                 return;
             }
 
-            el.textContent = 'Calculating...';
+            el.textContent = 'Scanning files...';
             el.style.color = 'var(--yellow)';
 
-            const res = await fetch('/api/sizes/filtered', {
+            const res = await fetch('/api/files/filtered', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({job_id: jobId, date_from: dateFrom, date_to: dateTo})
             });
             const data = await res.json();
-            el.textContent = `${data.files.toLocaleString()} files, ${data.size}`;
-            el.style.color = 'var(--accent)';
+
+            const rangeLabel = `${dateFrom || 'any'} → ${dateTo || 'now'}`;
+            el.innerHTML = `<a href="#" onclick="showFileList('${jobId}', '${esc(rangeLabel)}'); return false;" style="color: var(--accent); text-decoration: underline; cursor: pointer;">${data.total_files.toLocaleString()} files, ${esc(data.total_size)}</a>`;
+
+            window._lastFileList = data;
+            window._lastFileListJobId = jobId;
+            window._lastFileListRange = rangeLabel;
+            showFileList(jobId, rangeLabel);
+        }
+
+        function showFileList(jobId, rangeLabel) {
+            const data = window._lastFileList;
+            if (!data || window._lastFileListJobId !== jobId) return;
+
+            const job = [...(config.backup_jobs || []), ...(config.custom_jobs || [])].find(j => j.id === jobId);
+            const jobName = job ? job.name : jobId;
+
+            document.getElementById('fileListTitle').textContent = `${jobName} — Files to back up`;
+            document.getElementById('fileListSummary').innerHTML =
+                `<span class="filelist-range">${esc(rangeLabel)}</span>` +
+                `<span class="filelist-count">${data.total_files.toLocaleString()} files</span>` +
+                `<span class="filelist-total">${esc(data.total_size)}</span>`;
+
+            const content = document.getElementById('fileListContent');
+            if (data.files.length === 0) {
+                content.innerHTML = '<div class="filelist-empty">No files match this date range.</div>';
+            } else {
+                let html = '<table class="filelist-table"><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>';
+                for (const f of data.files) {
+                    html += `<tr><td class="filelist-path" title="${esc(f.path)}">${esc(f.path)}</td><td class="filelist-size">${esc(f.size_fmt)}</td><td class="filelist-mtime">${esc(f.mtime)}</td></tr>`;
+                }
+                html += '</tbody></table>';
+                content.innerHTML = html;
+            }
+
+            document.getElementById('fileListModal').classList.add('active');
         }
 
         async function startBackup(jobId) {
@@ -384,6 +477,20 @@
             });
         });
 
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme') || 'dark';
+            const next = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem('papabackup-theme', next);
+            updateThemeIcon();
+        }
+
+        function updateThemeIcon() {
+            const theme = document.documentElement.getAttribute('data-theme') || 'dark';
+            document.getElementById('themeBtn').innerHTML = theme === 'dark' ? '&#9790;' : '&#9728;';
+        }
+
+        updateThemeIcon();
         loadConfig();
         loadSizes();
         checkGdrive();
